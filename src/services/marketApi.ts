@@ -1,7 +1,7 @@
 import { marketOverview, screenerResults, watchlist, marketAlerts, portfolioHoldings } from './mockData';
-import { MarketOverview, Stock, AlertItem, PortfolioHolding } from '../types';
+import { MarketOverview, Stock, AlertItem, PortfolioHolding, PatternInsight, SignalDirection } from '../types';
 
-const LIVE_API_KEY = process.env.EXPO_PUBLIC_ALPHA_VANTAGE_API_KEY ?? 'demo';
+const ALPHA_VANTAGE_KEY = process.env.EXPO_PUBLIC_ALPHA_VANTAGE_API_KEY ?? 'demo';
 const LIVE_ENABLED = Boolean(process.env.EXPO_PUBLIC_ALPHA_VANTAGE_API_KEY);
 
 const normalizePrice = (value: string | undefined, fallback: number): number => {
@@ -16,6 +16,8 @@ const normalizePercent = (value: string | undefined, fallback: number): number =
   const parsed = Number(cleaned);
   return Number.isFinite(parsed) ? parsed : fallback;
 };
+
+const clamp = (value: number, min: number, max: number) => Math.min(Math.max(value, min), max);
 
 const quoteToStock = (symbol: string, name: string, data: Record<string, string>): Stock => {
   const price = normalizePrice(data['05. price'], 0);
@@ -41,20 +43,119 @@ const fetchQuote = async (symbol: string, name: string): Promise<Stock | null> =
 
   try {
     const response = await fetch(
-      `https://www.alphavantage.co/query?function=GLOBAL_QUOTE&symbol=${symbol}&apikey=${LIVE_API_KEY}`
+      `https://www.alphavantage.co/query?function=GLOBAL_QUOTE&symbol=${symbol}&apikey=${ALPHA_VANTAGE_KEY}`
     );
     const json = await response.json();
     const payload = json['Global Quote'] as Record<string, string> | undefined;
 
-    if (!payload) {
-      return null;
-    }
-
+    if (!payload) return null;
     return quoteToStock(symbol, name, payload);
   } catch (error) {
     console.warn(`Failed to fetch live quote for ${symbol}:`, error);
     return null;
   }
+};
+
+export const searchStocks = async (query: string): Promise<Stock[]> => {
+  const keyword = query.trim();
+  if (!keyword) return [];
+
+  if (!LIVE_ENABLED) return [];
+
+  try {
+    const response = await fetch(
+      `https://www.alphavantage.co/query?function=SYMBOL_SEARCH&keywords=${encodeURIComponent(keyword)}&apikey=${ALPHA_VANTAGE_KEY}`
+    );
+    const json = await response.json();
+    const matches = Array.isArray(json?.bestMatches) ? json.bestMatches : [];
+
+    return matches.slice(0, 5).map((match: any) => ({
+      symbol: match['1. symbol'],
+      name: match['2. name'],
+      price: 0,
+      change: 0,
+      changePercent: 0,
+      volume: 0,
+      marketCap: 'Live',
+      sentiment: 'Neutral',
+      sparkline: [0, 0, 0, 0, 0, 0, 0],
+    }));
+  } catch (error) {
+    console.warn('Search request failed:', error);
+    return [];
+  }
+};
+
+const buildPatternInsight = (stock: Stock): PatternInsight => {
+  const series = stock.sparkline.length ? stock.sparkline : [stock.price, stock.price * 0.99, stock.price, stock.price * 1.01, stock.price * 1.02, stock.price * 1.03, stock.price];
+
+  const latest = series[series.length - 1];
+  const first = series[0];
+  const mid = series[Math.max(0, Math.floor(series.length / 2))];
+  const directionDelta = latest - first;
+  const recentTrend = latest - mid;
+  const average = series.reduce((sum, item) => sum + item, 0) / series.length;
+  const range = Math.max(...series) - Math.min(...series);
+  const positiveCandles = series.slice(1).filter((value, index) => value > series[index]).length;
+  const negativeCandles = series.slice(1).filter((value, index) => value < series[index]).length;
+
+  let direction: SignalDirection = 'Neutral';
+  let pattern = 'Range bound';
+
+  if (directionDelta > 0 && recentTrend > 0) {
+    direction = 'Upward';
+    pattern = 'Bullish continuation';
+  } else if (directionDelta < 0 && recentTrend < 0) {
+    direction = 'Downward';
+    pattern = 'Bearish breakdown';
+  } else if (positiveCandles > negativeCandles) {
+    direction = 'Upward';
+    pattern = 'Momentum squeeze';
+  } else if (negativeCandles > positiveCandles) {
+    direction = 'Downward';
+    pattern = 'Distribution phase';
+  }
+
+  const score = clamp(
+    Math.round(
+      (Math.abs(directionDelta) / Math.max(average * 0.05, 1)) * 18 +
+        (positiveCandles - negativeCandles) * 8 +
+        stock.changePercent * 6 +
+        (direction === 'Upward' ? 18 : direction === 'Downward' ? -18 : 0)
+    ),
+    10,
+    95
+  );
+
+  const confidence = clamp(Math.abs(score), 35, 92);
+  const support = Number((Math.min(...series) * 0.995).toFixed(2));
+  const resistance = Number((Math.max(...series) * 1.005).toFixed(2));
+  const nextMove = direction === 'Upward'
+    ? `Upward bias: +${Math.max(0.5, Math.abs(stock.changePercent)).toFixed(1)}% expected`
+    : direction === 'Downward'
+      ? `Downward bias: -${Math.max(0.5, Math.abs(stock.changePercent)).toFixed(1)}% expected`
+      : 'Sideways bias: low conviction move';
+
+  return {
+    symbol: stock.symbol,
+    name: stock.name,
+    direction,
+    confidence,
+    pattern,
+    expectedMove: nextMove,
+    support,
+    resistance,
+    lastPrice: Number(latest.toFixed(2)),
+    changePercent: stock.changePercent,
+    volume: stock.volume,
+    score,
+    note: `${pattern} with ${range > 0 ? 'clear trend range' : 'compressed range'} and ${positiveCandles >= negativeCandles ? 'bullish participation' : 'weakening demand'} detected.`,
+  };
+};
+
+export const getPatternInsights = async (filter?: string): Promise<PatternInsight[]> => {
+  const base = await getScreenerResults(filter);
+  return base.map(buildPatternInsight);
 };
 
 const fetchMarketOverview = async (): Promise<MarketOverview[]> => {
@@ -92,28 +193,19 @@ export const getWatchlist = async (): Promise<Stock[]> => {
   return watchlist;
 };
 
-export const getScreenerResults = async (): Promise<Stock[]> => {
-  const symbols = [
-    { symbol: 'AAPL', name: 'Apple Inc.' },
-    { symbol: 'MSFT', name: 'Microsoft' },
-    { symbol: 'NVDA', name: 'NVIDIA' },
-    { symbol: 'TSLA', name: 'Tesla' },
-    { symbol: 'AMD', name: 'Advanced Micro Devices' },
-  ];
+export const getScreenerResults = async (filter?: string): Promise<Stock[]> => {
+  const base = screenerResults;
+  if (!filter) return base;
 
-  if (LIVE_ENABLED) {
-    const results = await Promise.all(
-      symbols.map(async ({ symbol, name }) => {
-        const stock = await fetchQuote(symbol, name);
-        return stock ?? screenerResults.find((item) => item.symbol.toLowerCase() === symbol.toLowerCase()) ?? null;
-      })
-    );
+  const filters: Record<string, (stock: Stock) => boolean> = {
+    Momentum: (stock) => stock.changePercent >= 1.5,
+    Breakout: (stock) => stock.volume > 30000000,
+    Value: (stock) => stock.price < 250,
+    'AI Bias': (stock) => stock.sentiment === 'Bullish' || stock.changePercent > 0,
+  };
 
-    const valid = results.filter(Boolean) as Stock[];
-    if (valid.length > 0) return valid;
-  }
-
-  return screenerResults;
+  const predicate = filters[filter];
+  return predicate ? base.filter(predicate) : base;
 };
 
 export const getAlerts = async (): Promise<AlertItem[]> => {
