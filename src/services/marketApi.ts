@@ -1,15 +1,118 @@
 import { marketOverview, screenerResults, watchlist, marketAlerts, portfolioHoldings } from './mockData';
 import { MarketOverview, Stock, AlertItem, PortfolioHolding } from '../types';
 
-export const getMarketOverview = async (): Promise<MarketOverview[]> => {
+const LIVE_API_KEY = process.env.EXPO_PUBLIC_ALPHA_VANTAGE_API_KEY ?? 'demo';
+const LIVE_ENABLED = Boolean(process.env.EXPO_PUBLIC_ALPHA_VANTAGE_API_KEY);
+
+const normalizePrice = (value: string | undefined, fallback: number): number => {
+  if (!value) return fallback;
+  const parsed = Number(value);
+  return Number.isFinite(parsed) ? parsed : fallback;
+};
+
+const normalizePercent = (value: string | undefined, fallback: number): number => {
+  if (!value) return fallback;
+  const cleaned = value.replace('%', '').trim();
+  const parsed = Number(cleaned);
+  return Number.isFinite(parsed) ? parsed : fallback;
+};
+
+const quoteToStock = (symbol: string, name: string, data: Record<string, string>): Stock => {
+  const price = normalizePrice(data['05. price'], 0);
+  const change = normalizePrice(data['09. change'], 0);
+  const changePercent = normalizePercent(data['10. change percent'], 0);
+  const volume = normalizePrice(data['06. volume'], 0);
+
+  return {
+    symbol,
+    name,
+    price,
+    change,
+    changePercent,
+    volume: Math.round(volume),
+    marketCap: 'Live',
+    sentiment: changePercent >= 0 ? 'Bullish' : changePercent < 0 ? 'Bearish' : 'Neutral',
+    sparkline: [price * 0.97, price * 0.98, price * 0.99, price, price * 1.01, price * 1.02, price],
+  };
+};
+
+const fetchQuote = async (symbol: string, name: string): Promise<Stock | null> => {
+  if (!LIVE_ENABLED) return null;
+
+  try {
+    const response = await fetch(
+      `https://www.alphavantage.co/query?function=GLOBAL_QUOTE&symbol=${symbol}&apikey=${LIVE_API_KEY}`
+    );
+    const json = await response.json();
+    const payload = json['Global Quote'] as Record<string, string> | undefined;
+
+    if (!payload) {
+      return null;
+    }
+
+    return quoteToStock(symbol, name, payload);
+  } catch (error) {
+    console.warn(`Failed to fetch live quote for ${symbol}:`, error);
+    return null;
+  }
+};
+
+const fetchMarketOverview = async (): Promise<MarketOverview[]> => {
   return marketOverview;
 };
 
+export const getMarketOverview = async (): Promise<MarketOverview[]> => {
+  try {
+    return await fetchMarketOverview();
+  } catch {
+    return marketOverview;
+  }
+};
+
 export const getWatchlist = async (): Promise<Stock[]> => {
+  const liveSymbols = [
+    { symbol: 'AAPL', name: 'Apple Inc.' },
+    { symbol: 'MSFT', name: 'Microsoft' },
+    { symbol: 'NVDA', name: 'NVIDIA' },
+    { symbol: 'TSLA', name: 'Tesla' },
+  ];
+
+  if (LIVE_ENABLED) {
+    const results = await Promise.all(
+      liveSymbols.map(async ({ symbol, name }) => {
+        const stock = await fetchQuote(symbol, name);
+        return stock ?? watchlist.find((item) => item.symbol.toLowerCase() === symbol.toLowerCase()) ?? null;
+      })
+    );
+
+    const valid = results.filter(Boolean) as Stock[];
+    if (valid.length > 0) return valid;
+  }
+
   return watchlist;
 };
 
 export const getScreenerResults = async (): Promise<Stock[]> => {
+  const symbols = [
+    { symbol: 'AAPL', name: 'Apple Inc.' },
+    { symbol: 'MSFT', name: 'Microsoft' },
+    { symbol: 'NVDA', name: 'NVIDIA' },
+    { symbol: 'TSLA', name: 'Tesla' },
+    { symbol: 'AMD', name: 'Advanced Micro Devices' },
+  ];
+
+  if (LIVE_ENABLED) {
+    const results = await Promise.all(
+      symbols.map(async ({ symbol, name }) => {
+        const stock = await fetchQuote(symbol, name);
+        return stock ?? screenerResults.find((item) => item.symbol.toLowerCase() === symbol.toLowerCase()) ?? null;
+      })
+    );
+
+    const valid = results.filter(Boolean) as Stock[];
+    if (valid.length > 0) return valid;
+  }
+
   return screenerResults;
 };
 
