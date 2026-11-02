@@ -6,6 +6,7 @@ import ScreenerScreen from '../screens/ScreenerScreen';
 import WatchlistScreen from '../screens/WatchlistScreen';
 import PortfolioScreen from '../screens/PortfolioScreen';
 import StockDetailScreen from '../screens/StockDetailScreen';
+import AlertsScreen from '../screens/AlertsScreen';
 import { colors } from '../theme';
 
 const Tab = createBottomTabNavigator();
@@ -54,6 +55,15 @@ export default function AppNavigator() {
   return (
     <RootStack.Navigator>
       <RootStack.Screen name="MainTabs" component={MainTabs} options={{ headerShown: false }} />
+      <RootStack.Screen
+        name="Alerts"
+        component={AlertsScreen}
+        options={{
+          headerStyle: { backgroundColor: colors.background },
+          headerTintColor: colors.text,
+          headerTitleAlign: 'center',
+        }}
+      />
       <RootStack.Screen
         name="StockDetail"
         component={StockDetailScreen}
